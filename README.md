@@ -61,18 +61,3 @@ On CPU the smoke script skips SNV-A, because its Shapley valuation takes
 more than 30 minutes on ResNet-18 without a GPU. `tests/test_snv.py::TestSNVAdaptive`
 covers SNV-A on CPU. Use `GTEP_DEVICE=cuda:0 bash scripts/smoke_test.sh` to include it.
 
-## Reproduce the CIFAR-100 results
-
-```bash
-# Every method, Class-IL and Task-IL, on four GPUs (resumable: rerun the same command after an interruption)
-python campaign/run_campaign.py --out runs/cifar100 --gpus 0 1 2 3
-
-# Tables for the paper
-python campaign/build_report.py --campaign runs/cifar100 --out reports/cifar100
-```
-
-To run a subset, use `--methods mcl snv` or `--scenarios class_il`.
-
-
-
-Each experiment in the paper used a single NVIDIA RTX PRO 6000 GPU.
