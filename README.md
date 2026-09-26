@@ -73,34 +73,6 @@ python campaign/build_report.py --campaign runs/cifar100 --out reports/cifar100
 
 To run a subset, use `--methods mcl snv` or `--scenarios class_il`.
 
-## CIFAR-20
 
-CIFAR-20 is CIFAR-100 relabelled by its 20 superclasses. Under GTEP each half
-holds 10 superclasses, run as 5 tasks × 2 classes; splits, search, selection
-and cost rules are unchanged.
-
-```bash
-# One GPU: 16 tuning runs share it; every D_E winner run still gets it alone
-GTEP_DATASET=cifar20 GTEP_NUM_WORKERS=0 python campaign/run_campaign.py \
-    --out runs/cifar20 --gpus 0 --pack 16
-python campaign/build_report.py --campaign runs/cifar20 --out reports/cifar20
-```
-
-A single run (one method, scenario, half and seed):
-
-```bash
-GTEP_PROTOCOL=legacy python audited_gtep.py --one --method mcl --scenario class_il \
-    --half 2 --seed 42 --epochs 200 --patience 15 --out runs/mcl_cil_s42 \
-    --config '{"lr":0.001,"lwf_lambda":1.0,"temperature":2.0,"mcl_density_alpha":0.25}'
-```
-
-SNV runs through `snv_adaptive_run.py` with the same flags, without `--one` and
-`--method`.
-
-The protocol is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md), the
-metric definitions in [docs/METRICS.md](docs/METRICS.md) and the cost
-measurements in [docs/COSTS.md](docs/COSTS.md). Implementation notes for each
-baseline are in [docs/BASELINES.md](docs/BASELINES.md), and the upstream
-repositories they reference are listed in [THIRD_PARTY.md](THIRD_PARTY.md).
 
 Each experiment in the paper used a single NVIDIA RTX PRO 6000 GPU.
