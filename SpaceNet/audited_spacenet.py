@@ -1,4 +1,4 @@
-"""SpaceNet MLP adapted to 32x32 RGB / 50 classes from the authors' MNIST code.
+"""SpaceNet MLP adapted to 32x32 RGB (one output per class of a GTEP half) from the authors' MNIST code.
 
 Preserves selected-node pools, neuron reservation, weight importance, and
 drop/grow. This is explicitly a CIFAR architecture adaptation, not a published
@@ -12,12 +12,12 @@ from wsn_helpers import _maskable_modules
 
 
 class SpaceNetMLP(nn.Module):
-    def __init__(self):
+    def __init__(self,num_classes=50,classes_per_task=5):
         super().__init__()
-        self.layers=nn.ModuleList([nn.Linear(3072,400),nn.Linear(400,400),nn.Linear(400,50)])
+        self.layers=nn.ModuleList([nn.Linear(3072,400),nn.Linear(400,400),nn.Linear(400,num_classes)])
         for layer in self.layers:
             nn.init.xavier_uniform_(layer.weight);nn.init.zeros_(layer.bias)
-        self.seen_upto=-1;self.classes_per_task=5;self.feature_dim=400
+        self.seen_upto=-1;self.classes_per_task=classes_per_task;self.feature_dim=400
 
     def ensure_head(self, task): self.seen_upto=max(self.seen_upto,task)
     def active_tasks(self): return list(range(self.seen_upto+1))
@@ -25,15 +25,17 @@ class SpaceNetMLP(nn.Module):
         return self.layers[1](self.layers[0](x.flatten(1)).relu()).relu()
     def forward(self,x,task_id=None):
         out=self.layers[2](self.get_features(x))
-        return out[:,:5*(self.seen_upto+1)] if task_id is None else out[:,task_id*5:(task_id+1)*5]
+        c=self.classes_per_task
+        return out[:,:c*(self.seen_upto+1)] if task_id is None else out[:,task_id*c:(task_id+1)*c]
 
 
 class AuditedSpaceNet(SpaceNet):
     def __init__(self,*args,density_factor=1.,**kw):
         super().__init__(*args,**kw)
         self.density_factor=density_factor
-        self.free_nodes=[torch.ones(n,device=self.device,dtype=torch.bool) for n in (3072,400,400,50)]
-        self.node_importance=[torch.zeros(n,device=self.device) for n in (3072,400,400,50)]
+        sizes=(3072,400,400,self.model.layers[2].out_features)
+        self.free_nodes=[torch.ones(n,device=self.device,dtype=torch.bool) for n in sizes]
+        self.node_importance=[torch.zeros(n,device=self.device) for n in sizes]
         self.initial_weights={n:m.parametrizations.weight.original.detach().clone()
                               for n,m in _maskable_modules(self.model)}
         self.allowed={};self.selected=[];self.bias_before={}
@@ -45,7 +47,8 @@ class AuditedSpaceNet(SpaceNet):
             indices=free.nonzero().flatten()
             chosen=indices[torch.randperm(len(indices),device=self.device)[:80]]
             mask=torch.zeros_like(free);mask[chosen]=True;selected.append(mask)
-        output=torch.zeros_like(self.free_nodes[3]);output[task_id*5:(task_id+1)*5]=True
+        c=self.model.classes_per_task
+        output=torch.zeros_like(self.free_nodes[3]);output[task_id*c:(task_id+1)*c]=True
         selected.append(output);self.selected=selected
         for v in self.node_importance:v.zero_()
         budgets=(round(10000*3072/784),1640,200)

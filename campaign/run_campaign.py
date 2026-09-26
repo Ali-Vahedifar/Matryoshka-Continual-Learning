@@ -22,9 +22,15 @@ Protocol (identical for every method, see docs/PROTOCOL.md):
 The driver is resumable: a finished run whose ``result.json`` matches its
 identity (method, scenario, half, seed, config, 10 tasks, 200-epoch policy) is
 reused, so re-running the command after an interruption continues the campaign.
+A run that exits without a valid result, or writes nothing to its log for
+--stall_hours, is killed and retried up to --retries times.
 
   python campaign/run_campaign.py --out runs/cifar100 --gpus 0 1 2 3
   python campaign/run_campaign.py --out runs/cifar100 --gpus 0 --methods mcl snv
+  # CIFAR-20 (superclasses: halves of 10, 5 tasks x 2) on one GPU, 16 tuning runs
+  # sharing it; D_E winner runs still take it alone.
+  GTEP_DATASET=cifar20 GTEP_NUM_WORKERS=0 python campaign/run_campaign.py \
+      --out runs/cifar20 --gpus 0 --pack 16
 """
 import argparse
 import csv
@@ -33,22 +39,26 @@ import json
 import os
 from pathlib import Path
 import random
+import signal
 import subprocess
 import sys
 import time
+
+import psutil
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault('GTEP_PROTOCOL', 'legacy')
 import audited_gtep as G                                            # noqa: E402
 
-METHODS = ['sgd', 'joint', 'ewc', 'si', 'lwf', 'wsn', 'pec', 'spacenet',
-           'nispa', 'uniclun', 'mcl', 'snv']
+# Dispatch order: MCL first, SNV-A last (it is also gated behind the rest).
+METHODS = ['mcl', 'sgd', 'joint', 'ewc', 'si', 'lwf', 'wsn', 'pec', 'spacenet',
+           'nispa', 'uniclun', 'snv']
 SEEDS = (42, 43, 44)
 ROUNDS = 30
 EPOCHS = 200
 PATIENCE = 15
-TASKS = 10
+TASKS = G.TASKS
 SAMPLE_SEED = 7
 
 # SNV-A switches (SNV/snv_adaptive.py).  Fixed across the search, recorded in
@@ -64,10 +74,21 @@ def scenarios(method):
             ['task_il'] if method == 'wsn' else ['class_il', 'task_il'])
 
 
-def configs_for(method):
+# --snv_scenario_switches: the per-scenario switches of the CIFAR-100 winners.
+# Class-IL routes on rotation+energy scores and trains the rotation head;
+# routing has no effect in Task-IL, where the rotation loss stays off.
+SNV_SCENARIO = {'class_il': dict(routing='rot_energy_z', rot_aux=1.0),
+                'task_il': dict(routing='maxprob', rot_aux=0.0)}
+
+
+def snv_variant(scenario, per_scenario):
+    return {**SNV_VARIANT, **(SNV_SCENARIO[scenario] if per_scenario else {})}
+
+
+def configs_for(method, scenario='class_il', per_scenario=False):
     rng = random.Random(SAMPLE_SEED)
     draws = [G.sample(G.SPACE[method], rng) for _ in range(ROUNDS)]
-    return [{**d, **SNV_VARIANT} if method == 'snv' else d for d in draws]
+    return [{**d, **snv_variant(scenario, per_scenario)} if method == 'snv' else d for d in draws]
 
 
 def atomic(path, data):
@@ -128,6 +149,13 @@ def main():
     p.add_argument('--patience', type=int, default=PATIENCE)
     p.add_argument('--tasks', type=int, default=TASKS)
     p.add_argument('--poll', type=float, default=5.0)
+    p.add_argument('--pack', type=int, default=1,
+                   help='concurrent tuning / FLOP-count runs per GPU; D_E winner runs always run alone')
+    p.add_argument('--retries', type=int, default=2, help='retries per failed or hung run')
+    p.add_argument('--stall_hours', type=float, default=3.0,
+                   help='kill a run that writes nothing to its log for this long')
+    p.add_argument('--snv_scenario_switches', action='store_true',
+                   help='SNV-A: rot_energy_z routing + rot_aux=1 in Class-IL, maxprob + rot_aux=0 in Task-IL')
     args = p.parse_args()
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -140,16 +168,28 @@ def main():
     # One campaign per directory.
     lock = (out / 'campaign.lock').open('w')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    # Runs outlive a dead driver (own sessions); starting again would launch the
+    # same jobs a second time into the same directories.
+    runs_dir = str(out / 'runs') + '/'
+    orphans = [q.pid for q in psutil.process_iter(['cmdline'])
+               if any(runs_dir in a for a in q.info['cmdline'] or [])]
+    if orphans:
+        raise RuntimeError(f'runs from an earlier driver are still alive (pids {orphans}); '
+                           'kill their process groups first')
 
     fingerprint = G.source_fingerprint()
-    protocol = dict(dataset='CIFAR-100 disjoint halves', classes_per_half=50, tasks=args.tasks,
-                    classes_per_task=5, D_HT=1, D_E=2, split_seed=1234, seeds=list(SEEDS),
+    protocol = dict(dataset=f'{G.DATASET_LABEL} disjoint halves', classes_per_half=G.HALF_CLASSES,
+                    tasks=args.tasks, classes_per_task=G.CPT, data_loader_workers=G.NUM_WORKERS,
+                    tuning_runs_per_gpu=args.pack, D_HT=1, D_E=2, split_seed=1234, seeds=list(SEEDS),
                     R=args.rounds, sample_seed=SAMPLE_SEED, max_total_epochs=args.epochs,
                     patience=args.patience, gtep_protocol=os.environ['GTEP_PROTOCOL'],
                     selection='mean over seeds of the harmonic mean of final ACC and AvgAcc on D_HT validation',
                     costs='tuning runs share GPUs and their timings are not reported; D_E winner runs '
-                          'take the GPU exclusively and carry the published cost numbers',
-                    snv_variant=SNV_VARIANT, methods=args.methods,
+                          'take the GPU exclusively and carry the published cost numbers; training '
+                          'FLOPs come from one extra D_E seed-42 run per winner with FLOP counting on '
+                          '(its timings are not reported)',
+                    snv_variant={s: snv_variant(s, args.snv_scenario_switches) for s in ('class_il', 'task_il')},
+                    methods=args.methods,
                     spaces={m: G.SPACE[m] for m in args.methods},
                     source_sha256=fingerprint)
     protocol = G.serial(protocol)
@@ -158,28 +198,36 @@ def main():
         if previous['source_sha256'] != protocol['source_sha256']:
             raise RuntimeError('training source changed since this campaign started; '
                                'start a new --out directory instead of mixing code versions')
+        # Documented, deliberate source fixes survive restarts.
+        protocol['source_amendments'] = previous.get('source_amendments', [])
     atomic(out / 'protocol.json', protocol)
 
     def verify_source():
         if G.source_fingerprint() != fingerprint:
             raise RuntimeError('training source changed while the campaign was running')
 
-    jobs, blocks, running, failed = [], [], {}, []
+    jobs, blocks, running, failed = [], [], [], []
 
-    def add_job(method, scenario, half, seed, config, tag):
+    def usable(job):
+        """A finished run of this exact job; a winner run must also have been GPU-exclusive."""
+        d = valid_result(job['directory'] / 'result.json', job['method'], job['scenario'], job['half'],
+                         job['seed'], job['config'], args.tasks, args.epochs)
+        return bool(d) and (not job['exclusive'] or d['cost_summary']['gpu_exclusive_observed'])
+
+    def add_job(method, scenario, half, seed, config, tag, flops=False):
         name = f'{method}_{scenario}_{tag}_s{seed}'
         job = dict(method=method, scenario=scenario, half=half, seed=seed, config=config,
-                   directory=out / 'runs' / name, state='pending', priority=len(jobs))
-        if valid_result(job['directory'] / 'result.json', method, scenario, half, seed, config,
-                        args.tasks, args.epochs):
+                   directory=out / 'runs' / name, state='pending', priority=len(jobs),
+                   flops=flops, exclusive=half == 2 and not flops, attempts=0)
+        if usable(job):
             job['state'] = 'complete'
         jobs.append(job)
         return job
 
     def add_block(method, scenario):
-        configs = configs_for(method)[:args.rounds]
+        configs = configs_for(method, scenario, args.snv_scenario_switches)[:args.rounds]
         block = dict(method=method, scenario=scenario, configs=configs, winner_jobs=None,
-                     done=False, signature=None, path=out / 'blocks' / f'{method}_{scenario}.json')
+                     flops_job=None, done=False, signature=None, path=out / 'blocks' / f'{method}_{scenario}.json')
         block['trials'] = [[add_job(method, scenario, 1, seed, config, f'ht_r{i}') for seed in SEEDS]
                            for i, config in enumerate(configs)]
         blocks.append(block)
@@ -196,29 +244,41 @@ def main():
             if len(complete) == len(block['trials']) and block['winner_jobs'] is None:
                 block['winner_jobs'] = [add_job(block['method'], block['scenario'], 2, seed,
                                                 best['config'], 'clean_eval') for seed in SEEDS]
+                # Training FLOPs need instrumentation inside the timed phases, so
+                # they come from a separate run whose timings are not reported.
+                block['flops_job'] = add_job(block['method'], block['scenario'], 2, SEEDS[0],
+                                             best['config'], 'train_flops', flops=True)
             evaluation = [str(j['directory'] / 'result.json')
                           for j in block['winner_jobs'] or [] if j['state'] == 'complete']
+            flops = block['flops_job']
+            train_flops = (str(flops['directory'] / 'result.json')
+                           if flops and flops['state'] == 'complete' else None)
             block['done'] = (len(complete) == len(block['trials']) and len(evaluation) == len(SEEDS))
-            signature = (len(complete), len(evaluation))
+            signature = (len(complete), len(evaluation), train_flops)
             if signature != block['signature']:
                 atomic(block['path'], dict(method=block['method'], scenario=block['scenario'],
                                            config_origin=f'search space, sample seed {SAMPLE_SEED}',
-                                           variant=SNV_VARIANT if block['method'] == 'snv' else None,
-                                           tuning=complete, best=best, evaluation=evaluation))
+                                           variant=(snv_variant(block['scenario'], args.snv_scenario_switches)
+                                                    if block['method'] == 'snv' else None),
+                                           tuning=complete, best=best, evaluation=evaluation,
+                                           train_flops=train_flops))
                 block['signature'] = signature
 
     def launch(job, gpu):
-        """Take the GPU's exclusive lock, check it is idle, then start the run."""
+        """Start a run.  A D_E winner run takes the GPU's exclusive lock and needs
+        an idle device; tuning and FLOP-count runs share it (timings unreported)."""
         verify_source()
-        lease = open(f'/tmp/gtep-{G.GPUS[gpu]}.lock', 'w')
-        try:
-            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            lease.close()
-            return False
-        if gpu_busy(gpu):
-            lease.close()
-            return False
+        lease = None
+        if job['exclusive']:
+            lease = open(f'/tmp/gtep-{G.GPUS[gpu]}.lock', 'w')
+            try:
+                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lease.close()
+                return False
+            if gpu_busy(gpu):
+                lease.close()
+                return False
         directory = Path(job['directory'])
         directory.mkdir(parents=True, exist_ok=True)
         worker = 'snv_adaptive_run.py' if job['method'] == 'snv' else 'audited_gtep.py'
@@ -229,20 +289,22 @@ def main():
                     '--config', json.dumps(job['config']), '--out', str(directory),
                     '--epochs', str(args.epochs), '--patience', str(args.patience),
                     '--tasks', str(args.tasks)]
-        # No --flops here: FLOP instrumentation would run inside the timed
-        # training phases.  Inference GFLOPs come from the worker's separate,
-        # untimed pass; training FLOPs need their own --flops run (docs/COSTS.md).
+        # --flops instruments the timed training phases, so it only ever goes to
+        # the separate train_flops run, never to a run whose costs are reported.
+        if job['flops']:
+            command.append('--flops')
         env = os.environ.copy()
         env.update(CUDA_VISIBLE_DEVICES=G.GPUS[gpu], GTEP_PROTOCOL=os.environ['GTEP_PROTOCOL'],
                    OMP_NUM_THREADS='2', MKL_NUM_THREADS='2')
         atomic(directory / 'command.json', dict(command=command, gpu=G.GPUS[gpu],
                cost_policy=('exclusive GPU; clean training timing; separate inference FLOP pass'
-                            if job['half'] == 2 else 'tuning run; timings not reported')))
+                            if job['exclusive'] else 'training FLOP count; timings not reported'
+                            if job['flops'] else 'tuning run; timings not reported')))
         log = (directory / 'train.log').open('a')
         process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log,
                                    stderr=subprocess.STDOUT, start_new_session=True)
         job.update(state='running', gpu=gpu)
-        running[gpu] = dict(job=job, process=process, lease=lease, log=log)
+        running.append(dict(job=job, process=process, lease=lease, log=log, gpu=gpu, started=time.time()))
         print('START', directory.name, 'GPU', gpu, flush=True)
         return True
 
@@ -268,42 +330,66 @@ def main():
     gate_snv = any(b['method'] != 'snv' for b in blocks) and any(b['method'] == 'snv' for b in blocks)
 
     while True:
-        for gpu, entry in list(running.items()):
+        for entry in list(running):
+            job = entry['job']
             code = entry['process'].poll()
             if code is None:
-                continue
+                # Silence since this attempt started: a retry reuses an old, stale log.
+                quiet = time.time() - max(entry['started'],
+                                          (Path(job['directory']) / 'train.log').stat().st_mtime)
+                if quiet < args.stall_hours * 3600:
+                    continue
+                # Hung (e.g. a deadlocked DataLoader): kill the run's whole session.
+                try:
+                    os.killpg(entry['process'].pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                code = entry['process'].wait()
+                reason = f'killed after {quiet / 3600:.2f} h without log output'
+            else:
+                reason = f'exit code {code}'
             entry['log'].close()
-            entry['lease'].close()
-            del running[gpu]
-            job = entry['job']
-            if valid_result(Path(job['directory']) / 'result.json', job['method'], job['scenario'],
-                            job['half'], job['seed'], job['config'], args.tasks, args.epochs):
+            if entry['lease']:
+                entry['lease'].close()
+            running.remove(entry)
+            if usable(job):
                 job['state'] = 'complete'
             else:
-                job['state'] = 'failed'
-                failed.append(dict(directory=str(job['directory']), returncode=code))
+                if code == 0:
+                    reason += ' without a usable result (incomplete, or a winner run not GPU-exclusive)'
+                job['attempts'] += 1
+                job['state'] = 'pending' if job['attempts'] <= args.retries else 'failed'
+                failed.append(dict(directory=str(job['directory']), reason=reason, returncode=code,
+                                   attempt=job['attempts'], retrying=job['state'] == 'pending'))
                 atomic(out / 'failed_jobs.json', failed)
-                print('FAILED', Path(job['directory']).name, 'code', code, flush=True)
+                print('RETRY' if job['state'] == 'pending' else 'FAILED', Path(job['directory']).name,
+                      reason, flush=True)
         refresh()
         baselines_done = all(b['done'] for b in blocks if b['method'] != 'snv')
         for gpu in args.gpus:
-            if gpu in running:
-                continue
-            ready = [j for j in jobs if j['state'] == 'pending'
-                     and (j['method'] != 'snv' or baselines_done or not gate_snv)]
-            if not ready:
-                continue
-            # Finished searches' winner measurements first, then tuning in order.
-            launch(min(ready, key=lambda j: (j['half'] != 2, j['priority'])), gpu)
+            while True:
+                here = [e for e in running if e['gpu'] == gpu]
+                ready = [j for j in jobs if j['state'] == 'pending'
+                         and (j['method'] != 'snv' or baselines_done or not gate_snv)]
+                if not ready or any(e['job']['exclusive'] for e in here):
+                    break
+                # Finished searches' winner measurements first, then tuning in order.
+                job = min(ready, key=lambda j: (j['half'] != 2, j['priority']))
+                # An exclusive run waits for the GPU to drain; nothing joins it.
+                full = bool(here) if job['exclusive'] else len(here) >= args.pack
+                if full or not launch(job, gpu):
+                    break
         states = [j['state'] for j in jobs]
         atomic(out / 'status.json', dict(
             stage='snv' if baselines_done else 'baselines',
-            active=[dict(gpu=g, run=Path(e['job']['directory']).name) for g, e in running.items()],
+            active=[dict(gpu=e['gpu'], run=Path(e['job']['directory']).name) for e in running],
             complete=states.count('complete'), pending=states.count('pending'),
-            running=states.count('running'), failed=len(failed),
+            running=states.count('running'), failed=states.count('failed'),
+            retried=sum(f['retrying'] for f in failed),
             blocks_done=sum(b['done'] for b in blocks), blocks=len(blocks),
             updated_at=time.time()))
-        if all(b['done'] for b in blocks):
+        # Also wait for the FLOP-count runs; a failed one does not block the report.
+        if all(b['done'] for b in blocks) and not running and 'pending' not in states:
             break
         if not running and not any(s == 'pending' for s in states):
             raise RuntimeError(f'campaign stalled on failed runs; see {out / "failed_jobs.json"}')

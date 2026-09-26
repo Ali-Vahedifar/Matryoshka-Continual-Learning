@@ -99,9 +99,10 @@ class NISPANet(nn.Module):
 
 
 def build_nispa_model(dataset, classes_per_task, scenario):
-    if dataset != 'cifar100':
-        raise ValueError('the faithful NISPA ConvNet is CIFAR-100 only')
-    return NISPANet(classes_per_task, 100, scenario)
+    classes = {'cifar100': 100, 'cifar20': 20}
+    if dataset not in classes:
+        raise ValueError('the faithful NISPA ConvNet is defined for CIFAR-100 / CIFAR-20 only')
+    return NISPANet(classes_per_task, classes[dataset], scenario)
 
 
 class NISPA(ContinualMethod):

@@ -73,6 +73,19 @@ python campaign/build_report.py --campaign runs/cifar100 --out reports/cifar100
 
 To run a subset, use `--methods mcl snv` or `--scenarios class_il`.
 
+## CIFAR-20
+
+CIFAR-20 is CIFAR-100 relabelled by its 20 superclasses. Under GTEP each half
+holds 10 superclasses, run as 5 tasks × 2 classes; splits, search, selection
+and cost rules are unchanged.
+
+```bash
+# One GPU: 16 tuning runs share it; every D_E winner run still gets it alone
+GTEP_DATASET=cifar20 GTEP_NUM_WORKERS=0 python campaign/run_campaign.py \
+    --out runs/cifar20 --gpus 0 --pack 16
+python campaign/build_report.py --campaign runs/cifar20 --out reports/cifar20
+```
+
 A single run (one method, scenario, half and seed):
 
 ```bash

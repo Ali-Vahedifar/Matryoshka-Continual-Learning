@@ -21,6 +21,8 @@ method and scenario are reported, and each must have held the GPU exclusively
 during training. Because the instrumentation then runs inside the timed phase,
 do this in a separate run, never in the run whose times are reported.
 `build_report.py` rejects a cost run in which FLOP counting overlapped timing.
+`run_campaign.py` does this automatically: one extra seed-42 D_E run per winner
+(`*_train_flops_s42`, timings not used), exported as the `Training_FLOPs` table.
 
 `campaign/build_report.py` turns these records into the `Costs_summary`,
 `Costs_per_seed`, `Cost_phases` and `Inference_per_task` tables.

@@ -15,6 +15,8 @@ Environment:
                   CIFAR-100 campaign ran) or 'paper' (default: SGD with
                   method-specific schedules).
   GTEP_DATA_ROOT  dataset directory (default ./data; CIFAR-100 downloads).
+  GTEP_DATASET    'cifar100' (default) or 'cifar20' (CIFAR-100 superclass labels).
+  GTEP_NUM_WORKERS  DataLoader workers per loader (default 2).
   GTEP_DEVICE     torch device for a single run (default cuda:0).
   GTEP_GPU_UUIDS  comma-separated GPU UUIDs for the queue; default: every
                   visible GPU, in nvidia-smi order.
@@ -52,6 +54,14 @@ def visible_gpu_uuids():
 
 GPUS=visible_gpu_uuids()
 DATA_ROOT=os.environ.get('GTEP_DATA_ROOT','./data')
+# Each half is TASKS tasks of CPT classes: CIFAR-100 halves hold 50 classes
+# (10 x 5); CIFAR-20 -- the 20 CIFAR-100 superclasses -- halves hold 10 (5 x 2).
+DATASET=os.environ.get('GTEP_DATASET','cifar100')
+TASKS,CPT={'cifar100':(10,5),'cifar20':(5,2)}[DATASET]
+HALF_CLASSES=TASKS*CPT
+DATASET_LABEL={'cifar100':'CIFAR-100','cifar20':'CIFAR-20 (CIFAR-100 superclasses)'}[DATASET]
+# 0 on hosts whose /dev/shm is too small to pass worker batches.
+NUM_WORKERS=int(os.environ.get('GTEP_NUM_WORKERS','2'))
 LR=('logu',1e-4,1e-2)
 SPACE={
  'sgd':{'lr':LR},'lwf':{'lr':LR,'lwf_lambda':('logu',.1,10),
@@ -177,9 +187,9 @@ def make_method(name,benchmark,device,config):
     config={k:v for k,v in config.items() if k not in ('batch_size','scheduler','milestone_count','lr_decay','weight_decay')}
     if name=='spacenet':
         from SpaceNet.audited_spacenet import AuditedSpaceNet,SpaceNetMLP
-        return AuditedSpaceNet(SpaceNetMLP(),device,scenario=benchmark.scenario,**config)
-    model=(build_custom_model(name,'cifar100',5,benchmark.scenario,10) if name in CUSTOM_BACKBONE
-           else create_model('cifar100',5,10,benchmark.scenario))
+        return AuditedSpaceNet(SpaceNetMLP(HALF_CLASSES,CPT),device,scenario=benchmark.scenario,**config)
+    model=(build_custom_model(name,DATASET,CPT,benchmark.scenario,TASKS) if name in CUSTOM_BACKBONE
+           else create_model(DATASET,CPT,TASKS,benchmark.scenario))
     if name=='joint':
         from joint_audited import JointPrefix
         return JointPrefix(model,device,scenario=benchmark.scenario,**config)
@@ -187,7 +197,7 @@ def make_method(name,benchmark,device,config):
         from UniCLUN.uniclun import UniCLUN
         return UniCLUN(model,device,scenario=benchmark.scenario,buffer_size=1000,**config)
     options=dict(config);lr=options.pop('lr')
-    options.update(num_classes=50,buffer_size=1000)
+    options.update(num_classes=HALF_CLASSES,buffer_size=1000)
     if name=='snv':options.update(estimator_mode='reverse_tmc',max_permutations=32,
         use_mab=False,payoff='loss',shapley_eval_batches=0,masked_training=True,
         consolidation_epochs=25,consolidation_within_budget=True)
@@ -208,8 +218,8 @@ def one(args):
     device=torch.device(os.environ.get('GTEP_DEVICE','cuda:0'))
     ledger=CostLedger(device)
     with ledger.phase('setup',count_flops=False):
-        benchmark=ContinualLearningBenchmark('cifar100',10,DATA_ROOT,args.seed,
-            args.scenario,2,gtep_half=args.half,split_seed=1234)
+        benchmark=ContinualLearningBenchmark(DATASET,TASKS,DATA_ROOT,args.seed,
+            args.scenario,NUM_WORKERS,gtep_half=args.half,split_seed=1234)
         loaders=[benchmark.get_task_data(t,config.get('batch_size',64)) for t in range(args.tasks)]
         if args.smoke_samples:
             from torch.utils.data import DataLoader,Subset
@@ -220,7 +230,7 @@ def one(args):
         if args.method=='snv':method.consolidation_epochs=max(1,args.epochs//2)
         method.model.to(device)
     def output_space():
-        return (method.full_output_space(10) if hasattr(method,'full_output_space') else full_space(method.model,10))
+        return (method.full_output_space(TASKS) if hasattr(method,'full_output_space') else full_space(method.model,TASKS))
     checkpoint_model=method.model
     with ledger.phase('random_initialization_evaluation',method):
         with output_space():
@@ -269,7 +279,8 @@ def one(args):
             'evaluation_split':'D_HT validation' if args.half==1 else 'D_E test',
             'hardware':{'gpu':torch.cuda.get_device_name(0) if device.type=='cuda' else 'cpu','gpu_uuid':os.environ.get('CUDA_VISIBLE_DEVICES'),
                         'torch':torch.__version__,'cuda':torch.version.cuda},
-            'class_order':benchmark.class_order.tolist()}
+            'class_order':benchmark.class_order.tolist(),'dataset':DATASET,
+            'random_initialization_row':baseline}
     from audit_cost import summarize
     output['cost_summary']=summarize(ledger.records,inference,output['checkpoint_bytes'])
     output['method_variant']=getattr(method,'name',args.method)

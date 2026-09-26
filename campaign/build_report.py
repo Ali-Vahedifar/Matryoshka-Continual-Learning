@@ -134,13 +134,14 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--campaign', required=True, help='campaign directory written by run_campaign.py')
     p.add_argument('--out', required=True)
-    p.add_argument('--label', default='CIFAR-100 GTEP campaign')
+    p.add_argument('--label', default=None, help='report title (default: from protocol.json)')
     args = p.parse_args()
     root = Path(args.campaign).resolve()
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     blocks, ready = load_blocks(root)
     protocol = read(root / 'protocol.json') if (root / 'protocol.json').exists() else {}
+    args.label = args.label or protocol.get('dataset', 'CIFAR-100 disjoint halves') + ' GTEP campaign'
     seeds = set(protocol.get('seeds', [42, 43, 44]))
     epochs = protocol.get('max_total_epochs', 200)
 
@@ -149,6 +150,7 @@ def main():
     results = []; result_summary = []; trials = []; trial_seeds = []; selected = []
     costs = []; cost_summary = []; task_rows = []; phase_rows = []; inference_rows = []
     matrices = []; all_configs = []; protocols = []; references = {}
+    tuning_matrices = []; curves = []; traces = []; flops_rows = []
 
     for b in blocks:
         method, scenario = b['method'], b['scenario']
@@ -172,6 +174,11 @@ def main():
                        'training_policy_json': json.dumps(d['training_policy'], sort_keys=True),
                        'elapsed_seconds_training_loop': d['elapsed_seconds'], 'result_path': file}
                 trial_seeds.append(row); group.append(row)
+                tuning_matrices += [{**base, 'trial_index': index, 'seed': d['seed'],
+                                     'selected': row['selected'], 'after_task_index': i,
+                                     'evaluated_task_index': j,
+                                     'accuracy_pct': 100 * v if number(v) else None}
+                                    for i, a in enumerate(d['matrix']) for j, v in enumerate(a)]
                 references[file] = hashlib.sha256(Path(file).read_bytes()).hexdigest()
             assert {r['seed'] for r in group} == seeds, f'{method}/{scenario} trial {index}: seeds'
             assert math.isclose(st.mean(r['HARMONIC_pct'] for r in group) / 100, t['score'], abs_tol=1e-9)
@@ -236,6 +243,9 @@ def main():
             for record in records:
                 phase_rows.append({**base, 'seed': d['seed'],
                                    **{k: v for k, v in record.items() if not isinstance(v, (list, dict))}})
+                traces += [{**base, 'seed': d['seed'], 'phase': record['phase'],
+                            **{k: v for k, v in s.items() if not isinstance(v, list)}}
+                           for s in record.get('sensor_samples', [])]
             cost_group.append(cost); costs.append(cost)
             for t, h in enumerate(d['all_task_histories']):
                 task_rows.append({**base, 'seed': d['seed'], 'task_index': t,
@@ -248,6 +258,14 @@ def main():
                                   'selected_neurons': h.get('selected'),
                                   'best_validation_loss': h.get('best_validation_loss'),
                                   'cap_reached_while_improving': h.get('cap_reached_while_improving')})
+                curves += [{**base, 'seed': d['seed'], 'task_index': t,
+                            **{k: v for k, v in e.items() if not isinstance(v, (list, dict))}}
+                           for e in h.get('epoch_log') or [] if isinstance(e, dict)]
+            for j, value in enumerate(d.get('random_initialization_row') or []):
+                matrices.append({**base, 'seed': d['seed'], 'after_task_index': -1,
+                                 'evaluated_task_index': j,
+                                 'accuracy_pct': 100 * value if number(value) else None,
+                                 'evaluation_space': 'random initialization (FWT baseline b_t)'})
             for i, a in enumerate(d['matrix']):
                 for j, value in enumerate(a):
                     matrices.append({**base, 'seed': d['seed'], 'after_task_index': i,
@@ -266,6 +284,15 @@ def main():
               'seed_accounted_gpu_hours_sum': sum(x['accounted_run_gpu_hours'] for x in cost_group)}
         for key in ('peak_allocated_MB', 'peak_reserved_MB', 'peak_device_used_MB', 'peak_process_tree_RSS_MB'):
             ca[key + '_max_over_seeds'] = max((x[key] for x in cost_group if number(x[key])), default=None)
+        if b.get('train_flops'):
+            d = read(b['train_flops'])
+            assert d['config'] == best['config'] and d['half'] == 2, f"FLOP run mismatch: {b['train_flops']}"
+            per_task = [x['supported_operator_flops'] for x in read(Path(b['train_flops']).parent / 'costs.json')
+                        if '/training' in x['phase']]
+            ca['training_GFLOPs_total_seed42'] = sum(per_task) / 1e9
+            flops_rows.append({**base, 'seed': d['seed'], 'training_GFLOPs_total': sum(per_task) / 1e9,
+                               **{f'training_GFLOPs_task{t}': v / 1e9 for t, v in enumerate(per_task)},
+                               'result_path': b['train_flops']})
         cost_summary.append(ca)
         selected.append({**base, 'trial_index': best.get('trial_index'),
                          'D_HT_HARMONIC_pct': best['score'] * 100,
@@ -280,7 +307,9 @@ def main():
                   f"method/scenario blocks, {len(trials)} configurations, {len(trial_seeds)} tuning runs, "
                   f"{len(results)} final winner runs. PEC is Class-IL only; WSN is Task-IL only. "
                   "SNV means SNV-A (SNV/snv_adaptive.py); MCL is the density-readout arm."),
-        ('Dataset', 'CIFAR-100, disjoint 50-class halves, 10 tasks x 5 classes per half. Fixed half '
+        ('Dataset', f"{protocol.get('dataset', 'CIFAR-100 disjoint halves')}: "
+                    f"{protocol.get('classes_per_half', 50)}-class halves, {protocol.get('tasks', 10)} tasks x "
+                    f"{protocol.get('classes_per_task', 5)} classes per half. Fixed half "
                     'membership split_seed=1234; class/task order seeds 42, 43, 44. Original train+test '
                     'pooled and split 70/10/20 into train/validation/test per class.'),
         ('Training protocol', f"GTEP_PROTOCOL={protocol.get('gtep_protocol', 'legacy')}: batch 64, weight_decay=0, "
@@ -302,7 +331,7 @@ def main():
                     'task. AF: mean(max accuracy from learning through the final stage - final accuracy), '
                     'excluding the last task.'),
         ('FWT', 'Mean(next-task accuracy before learning - random-initialization accuracy). Future-task CIL '
-                    'diagnostics use the full 50-class output space; seen-task CIL accuracy uses seen classes.'),
+                    'diagnostics use the full output space of the half; seen-task CIL accuracy uses seen classes.'),
         ('PS', 'P = mean[(A[t,t]-A[t-1,t])/(1-A[t-1,t])]; S = 1 + BWT on raw fractions; '
                     'PS = 2*max(P,0)*max(S,0)/(max(P,0)+max(S,0)). P, S and PS are all exported.'),
         ('Joint', 'Joint trains a fresh model on each seen-task prefix. Its BWT/FWT/AF/PS are retained as '
@@ -313,7 +342,8 @@ def main():
                     'run -- not the whole hyper-parameter campaign.'),
         ('FLOPs and latency', 'GFLOPs are supported-operator INFERENCE FLOPs per sample (a multiply-add counts '
                     'as 2), measured in a pass outside the latency timer. Dense masked operators keep their '
-                    'dense FLOP cost. Training FLOPs are not measured in the clean cost runs.'),
+                    'dense FLOP cost. Training FLOPs are not measured in the clean cost runs; they come from one '
+                    'separate seed-42 D_E run per winner with FLOP counting on (Training_FLOPs).'),
         ('Inference measurement', 'The final trained model is evaluated across the 10 task inputs; the mean is '
                     'taken over tasks, then seeds. Batches 1 and 64 are exported separately: device-resident '
                     'input, host dispatch plus synchronized device execution, 10 timed repeats after 5 warmups. '
@@ -359,10 +389,16 @@ def main():
               ('All_tuning_seeds', trial_seeds), ('Search_spaces', spaces),
               ('Resolved_training_policy', protocols), ('Epochs_and_tasks', task_rows),
               ('Inference_per_task', inference_rows), ('Cost_phases', phase_rows),
-              ('Accuracy_matrices', matrices)]
+              ('Accuracy_matrices', matrices), ('Epoch_curves', curves),
+              ('Training_FLOPs', flops_rows)]
+    tables = [(name, rows) for name, rows in tables if rows]
     for name, rows in tables:
         csv_write(out / (name + '.csv'), rows)
     xlsx_write(out / 'campaign_tables.xlsx', tables)
+    # CSV only, too large for the workbook: every tuning run's matrix, 4 Hz GPU sensor traces.
+    for name, rows in (('Tuning_accuracy_matrices', tuning_matrices), ('Sensor_traces_DE', traces)):
+        if rows:
+            csv_write(out / (name + '.csv'), rows)
     (out / 'all_hyperparameters_and_winners.json').write_text(json.dumps(all_configs, indent=2))
     (out / 'provenance.json').write_text(json.dumps(
         {'generated_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'campaign': str(root),
@@ -390,7 +426,8 @@ def main():
                   'Infer ms/sample (B64)': fmt(r.get('infer_ms_per_sample_batch64_mean'), '.3f'),
                   'GPU util %': fmt(r.get('gpu_util_percent_mean'), '.1f'),
                   'GPU h/run': fmt(r.get('accounted_run_gpu_hours_mean'), '.3f'),
-                  'Resident params MB': fmt(r.get('model_parameters_MB_mean'), '.2f')}
+                  'Resident params MB': fmt(r.get('model_parameters_MB_mean'), '.2f'),
+                  'Train GFLOPs (s42)': fmt(r.get('training_GFLOPs_total_seed42'), '.4g')}
                  for r in cost_summary if r['scenario'] == scen]
         if table:
             displays.append((title, table))

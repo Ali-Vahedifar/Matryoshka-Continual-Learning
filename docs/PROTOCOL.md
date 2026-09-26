@@ -18,6 +18,9 @@ end to end.
 * The two scenarios:
   * **Class-IL** predicts over every class seen so far, with no task identity.
   * **Task-IL** is given the task identity and uses that task's head.
+* **CIFAR-20** (`GTEP_DATASET=cifar20`): the same images labelled by the 20
+  CIFAR-100 superclasses. Each half holds 10 superclasses, run as **5 tasks ×
+  2 classes**. Everything else on this page is unchanged.
 
 ## Training policy (`GTEP_PROTOCOL=legacy`, the setting the paper's numbers use)
 

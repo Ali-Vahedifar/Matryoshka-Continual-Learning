@@ -34,7 +34,7 @@ def make_method(name, benchmark, device, config):
     variant = {k: config[k] for k in VARIANT_KEYS if k in config}
     # Identical to audited_gtep.make_method + baselines.build_method for 'snv'.
     method = SNVAdaptive(
-        model=create_model('cifar100', 5, 10, benchmark.scenario), device=device,
+        model=create_model(G.DATASET, G.CPT, G.TASKS, benchmark.scenario), device=device,
         scenario=benchmark.scenario, lr=config['lr'], sparsity_ratio=0.1,
         truncation_threshold=config.get('truncation', 0.1),
         max_permutations=config.get('max_permutations', 32),     # override: smoke tests only

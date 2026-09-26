@@ -12,7 +12,7 @@ them. To inspect them next to this code, clone them into `third_party/`
 |---|---|---|---|
 | `pec` | PEC mechanism: a shared frozen teacher with independent per-class students (`PEC/pec.py`) | https://github.com/michalzajac-ml/pec | `3c15633` |
 | `spacenet` | SpaceNet reference (`SpaceNet/`) | https://github.com/GhadaSokar/SpaceNet *(URL not recorded by the campaign; verify)* | not recorded |
-| `uniclun` | UniCLUN reference. The upstream repository omits the model module, so `UniCLUN/uniclun.py` is re-implemented from the paper. | *(not recorded by the campaign; fill in from the paper)* | not recorded |
+| `uniclun` | UniCLUN reference. The upstream repository omits the model module, so `UniCLUN/uniclun.py` is re-implemented from the paper. | arXiv:2408.11374 (paper; no complete upstream code) | — |
 | `gtep/PyCIL` | GTEP protocol reference code | https://github.com/G-U-N/PyCIL *(verify)* | not recorded |
 | `gtep/LAMDA-PILOT` | GTEP protocol reference code | https://github.com/sun-hailong/LAMDA-PILOT *(verify)* | not recorded |
 

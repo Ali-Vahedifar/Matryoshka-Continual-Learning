@@ -1,7 +1,8 @@
 """
 Continual-learning benchmarks.
 
-Datasets: Permuted MNIST, CIFAR-100, TinyImageNet, ImageNet-1k.
+Datasets: Permuted MNIST, CIFAR-100, CIFAR-20 (the 20 CIFAR-100 superclasses),
+TinyImageNet, ImageNet-1k.
 Task splits: 10, 20 or 50 tasks (ImageNet-1k is the only one evaluated at 50).
 
 Splits follow the experimental setup: for every task the samples of that task's
@@ -16,6 +17,7 @@ indices 0..C-1 for TIL.
 """
 
 import os
+import pickle
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -131,6 +133,7 @@ class TinyImageNet:
 _STATS = {
     'cifar10':  ([0.4914, 0.4822, 0.4465], [0.2470, 0.2435, 0.2616]),
     'cifar100': ([0.5071, 0.4867, 0.4408], [0.2675, 0.2565, 0.2761]),
+    'cifar20':  ([0.5071, 0.4867, 0.4408], [0.2675, 0.2565, 0.2761]),
     'tinyimagenet': ([0.4802, 0.4481, 0.3975], [0.2770, 0.2691, 0.2821]),
     'imagenet1k': ([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
 }
@@ -142,7 +145,7 @@ def build_transforms(dataset: str, train: bool):
                                    transforms.Normalize((0.1307,), (0.3081,))])
     mean, std = _STATS[dataset]
     norm = transforms.Normalize(mean, std)
-    if dataset in ('cifar10', 'cifar100'):
+    if dataset in ('cifar10', 'cifar100', 'cifar20'):
         aug = [transforms.RandomCrop(32, padding=4), transforms.RandomHorizontalFlip()]
         base = []
     elif dataset == 'tinyimagenet':
@@ -161,8 +164,8 @@ def build_transforms(dataset: str, train: bool):
 class ContinualLearningBenchmark:
     """Sequential tasks with 70 / 10 / 20 splits."""
 
-    NUM_CLASSES = {'pmnist': 10, 'cifar10': 10, 'cifar100': 100, 'tinyimagenet': 200,
-                   'imagenet1k': 1000}
+    NUM_CLASSES = {'pmnist': 10, 'cifar10': 10, 'cifar100': 100, 'cifar20': 20,
+                   'tinyimagenet': 200, 'imagenet1k': 1000}
 
     def __init__(self, dataset_name: str, num_tasks: int, data_root: str = './data',
                  seed: int = 42, scenario: str = 'class_il', num_workers: int = 4,
@@ -226,9 +229,16 @@ class ContinualLearningBenchmark:
             tr = datasets.CIFAR10(root, train=True, download=self.download)
             te = datasets.CIFAR10(root, train=False, download=self.download)
             pool = _ConcatPool(tr, te, tr.targets, te.targets)
-        elif name == 'cifar100':
+        elif name in ('cifar100', 'cifar20'):
             tr = datasets.CIFAR100(root, train=True, download=self.download)
             te = datasets.CIFAR100(root, train=False, download=self.download)
+            if name == 'cifar20':
+                # CIFAR-20: the same images labelled by their 20 superclasses.
+                # torchvision reads only the fine labels, so take the coarse
+                # ones from the same files, in the same order.
+                for ds, split in ((tr, 'train'), (te, 'test')):
+                    with open(os.path.join(root, ds.base_folder, split), 'rb') as f:
+                        ds.targets = pickle.load(f, encoding='latin1')['coarse_labels']
             pool = _ConcatPool(tr, te, tr.targets, te.targets)
         elif name == 'tinyimagenet':
             tr = TinyImageNet(root, train=True, download=self.download)

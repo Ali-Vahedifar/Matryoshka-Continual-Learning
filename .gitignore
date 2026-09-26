@@ -1,0 +1,13 @@
+# Data, checkpoints and run outputs are never committed.
+data/
+runs/
+reports/
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.lock
+__pycache__/
+*.pyc
+.pytest_cache/
+third_party/

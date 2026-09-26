@@ -273,8 +273,9 @@ class ContinualLearningModel(nn.Module):
 # Backbone per dataset.  ResNet-18 is adequate at 32px; at 64px and 224px the
 # depth matters more than the saving, so Tiny-ImageNet and ImageNet-1k use
 # ResNet-50 by default.  Overridable with --backbone.
-_INPUT_SIZE = {'cifar10': 32, 'cifar100': 32, 'tinyimagenet': 64, 'imagenet1k': 224}
-_DEFAULT_BACKBONE = {'cifar10': 'resnet18', 'cifar100': 'resnet18', 'tinyimagenet': 'resnet50',
+_INPUT_SIZE = {'cifar10': 32, 'cifar100': 32, 'cifar20': 32, 'tinyimagenet': 64, 'imagenet1k': 224}
+_DEFAULT_BACKBONE = {'cifar10': 'resnet18', 'cifar100': 'resnet18', 'cifar20': 'resnet18',
+                     'tinyimagenet': 'resnet50',
                      'imagenet1k': 'resnet50'}
 _RESNETS = {'resnet18': ResNet18, 'resnet50': ResNet50}
 
